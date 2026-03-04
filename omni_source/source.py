@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Iterable, Iterator, List, Optional, Set
 
 import yaml
@@ -81,12 +81,13 @@ class OmniSource(Source):
         self._semantic_dataset_urns: Set[str] = set()
         self._topic_dataset_urns: Set[str] = set()
         self._topic_urn_by_key: Dict[str, str] = {}
+        self._topic_ingested_keys: Set[str] = set()
         self._physical_dataset_urns: Set[str] = set()
         self._model_context_by_id: Dict[str, Dict[str, Optional[str]]] = {}
 
     @classmethod
     def create(cls, config_dict, ctx):
-        config = OmniSourceConfig.parse_obj(config_dict)
+        config = OmniSourceConfig.model_validate(config_dict)
         return cls(config, ctx)
 
     def get_report(self) -> OmniSourceReport:
@@ -201,7 +202,7 @@ class OmniSource(Source):
         return make_dataset_urn("omni", f"{model_id}.topic.{topic_name}", self.config.env)
 
     def _default_audit_stamps(self, updated_at: Optional[str] = None) -> ChangeAuditStampsClass:
-        now_ms = int(datetime.utcnow().timestamp() * 1000)
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         event_ms = now_ms
         if updated_at:
             try:
@@ -227,10 +228,14 @@ class OmniSource(Source):
     ) -> Iterator[MetadataWorkUnit]:
         if not topic:
             return
+        topic_key = f"{model_id}:{topic_name}"
+        if topic_key in self._topic_ingested_keys:
+            return
+        self._topic_ingested_keys.add(topic_key)
         self.report.topics_scanned += 1
         topic_urn = self._topic_dataset_urn(model_id, topic_name)
         self._topic_dataset_urns.add(topic_urn)
-        self._topic_urn_by_key[f"{model_id}:{topic_name}"] = topic_urn
+        self._topic_urn_by_key[topic_key] = topic_urn
         yield from self._emit_dataset_properties(
             dataset_urn=topic_urn,
             name=topic_name,
@@ -370,7 +375,16 @@ class OmniSource(Source):
         yield self._as_workunit(MetadataChangeProposalWrapper(entityUrn=chart_urn, aspect=info))
 
     def _ingest_semantic_model(self) -> Iterator[MetadataWorkUnit]:
-        connections = {c.get("id"): c for c in self.client.list_connections(self.config.include_deleted)}
+        connections: Dict[str, Dict[str, object]] = {}
+        try:
+            connections = {
+                c.get("id"): c for c in self.client.list_connections(self.config.include_deleted)
+            }
+        except Exception as exc:
+            self.report.report_warning(
+                "connections-fetch",
+                f"Failed to fetch Omni connections; proceeding with config overrides only: {exc}",
+            )
         for model in self.client.list_models(page_size=self.config.page_size):
             model_id = model.get("id")
             if not model_id:
@@ -379,14 +393,6 @@ class OmniSource(Source):
                 continue
             self.report.models_scanned += 1
 
-            try:
-                model_yaml_payload = self.client.get_model_yaml(model_id)
-            except Exception as exc:
-                self.report.report_warning(
-                    "model-yaml-fetch",
-                    f"Failed to fetch model YAML for {model_id}: {exc}",
-                )
-                continue
             connection_id = model.get("connectionId") or ""
             connection = connections.get(connection_id)
             platform = (connection or {}).get("dialect") or "database"
@@ -405,6 +411,14 @@ class OmniSource(Source):
                 "platform_instance": platform_instance,
             }
 
+            try:
+                model_yaml_payload = self.client.get_model_yaml(model_id)
+            except Exception as exc:
+                self.report.report_warning(
+                    "model-yaml-fetch",
+                    f"Failed to fetch model YAML for {model_id}: {exc}",
+                )
+                continue
             topic_names = self._topic_names_from_yaml(model_yaml_payload.get("files", {}))
             if not topic_names:
                 continue
@@ -588,64 +602,68 @@ class OmniSource(Source):
                     )
                     self.report.semantic_datasets_emitted += 1
 
-                downstream_field_urn = make_schema_field_urn(
-                    dashboard_dataset_urn, f"{field_ref.view}.{field_ref.field}"
-                )
                 key = self._canonical_semantic_field_key(
                     model_id_from_dashboard, field_ref.view, field_ref.field
                 )
                 semantic_field = self._semantic_fields.get(key)
-                if not semantic_field:
-                    self.report.fine_grained_lineage_edges_unresolved += 1
-                    continue
-                semantic_urn = self._semantic_dataset_urn(
-                    semantic_field.model_id, semantic_field.view_name
-                )
-                upstream_semantic_urns.add(semantic_urn)
-                semantic_field_urn = make_schema_field_urn(semantic_urn, semantic_field.field_name)
-                semantic_edge = (
-                    tuple([semantic_field_urn]),
-                    tuple([downstream_field_urn]),
-                )
-                if semantic_edge not in fine_grained_dedupe:
-                    fine_grained_dedupe.add(semantic_edge)
-                    fine_grained_lineages.append(
-                        FineGrainedLineageClass(
-                            upstreamType=FineGrainedLineageUpstreamTypeClass.FIELD_SET,
-                            downstreamType=FineGrainedLineageDownstreamTypeClass.FIELD,
-                            upstreams=[semantic_field_urn],
-                            downstreams=[downstream_field_urn],
-                            transformOperation="OMNI_QUERY_FIELD_MAPPING",
-                        )
+                if semantic_field:
+                    semantic_urn = self._semantic_dataset_urn(
+                        semantic_field.model_id, semantic_field.view_name
                     )
-                if semantic_field.confidence == "exact":
-                    self.report.fine_grained_lineage_edges_exact += 1
-                elif semantic_field.confidence == "derived":
-                    self.report.fine_grained_lineage_edges_derived += 1
-                else:
-                    self.report.fine_grained_lineage_edges_unresolved += 1
+                    upstream_semantic_urns.add(semantic_urn)
+                    for physical_urn in semantic_field.upstream_physical_urns:
+                        upstream_physical_urns.add(physical_urn)
+                        for chart_urn in chart_urns:
+                            chart_inputs.setdefault(chart_urn, set()).add(physical_urn)
 
-                for physical_urn in semantic_field.upstream_physical_urns:
-                    upstream_physical_urns.add(physical_urn)
-                    for chart_urn in chart_urns:
-                        chart_inputs.setdefault(chart_urn, set()).add(physical_urn)
-                    physical_field_urn = make_schema_field_urn(physical_urn, semantic_field.field_name)
-                    physical_edge = (
-                        tuple([physical_field_urn]),
+                if self.config.enable_column_lineage:
+                    downstream_field_urn = make_schema_field_urn(
+                        dashboard_dataset_urn, f"{field_ref.view}.{field_ref.field}"
+                    )
+                    if not semantic_field:
+                        self.report.fine_grained_lineage_edges_unresolved += 1
+                        continue
+                    semantic_field_urn = make_schema_field_urn(semantic_urn, semantic_field.field_name)
+                    semantic_edge = (
+                        tuple([semantic_field_urn]),
                         tuple([downstream_field_urn]),
                     )
-                    if physical_edge in fine_grained_dedupe:
-                        continue
-                    fine_grained_dedupe.add(physical_edge)
-                    fine_grained_lineages.append(
-                        FineGrainedLineageClass(
-                            upstreamType=FineGrainedLineageUpstreamTypeClass.FIELD_SET,
-                            downstreamType=FineGrainedLineageDownstreamTypeClass.FIELD,
-                            upstreams=[physical_field_urn],
-                            downstreams=[downstream_field_urn],
-                            transformOperation="OMNI_SEMANTIC_TO_PHYSICAL_MAPPING",
+                    if semantic_edge not in fine_grained_dedupe:
+                        fine_grained_dedupe.add(semantic_edge)
+                        fine_grained_lineages.append(
+                            FineGrainedLineageClass(
+                                upstreamType=FineGrainedLineageUpstreamTypeClass.FIELD_SET,
+                                downstreamType=FineGrainedLineageDownstreamTypeClass.FIELD,
+                                upstreams=[semantic_field_urn],
+                                downstreams=[downstream_field_urn],
+                                transformOperation="OMNI_QUERY_FIELD_MAPPING",
+                            )
                         )
-                    )
+                    if semantic_field.confidence == "exact":
+                        self.report.fine_grained_lineage_edges_exact += 1
+                    elif semantic_field.confidence == "derived":
+                        self.report.fine_grained_lineage_edges_derived += 1
+                    else:
+                        self.report.fine_grained_lineage_edges_unresolved += 1
+
+                    for physical_urn in semantic_field.upstream_physical_urns:
+                        physical_field_urn = make_schema_field_urn(physical_urn, semantic_field.field_name)
+                        physical_edge = (
+                            tuple([physical_field_urn]),
+                            tuple([downstream_field_urn]),
+                        )
+                        if physical_edge in fine_grained_dedupe:
+                            continue
+                        fine_grained_dedupe.add(physical_edge)
+                        fine_grained_lineages.append(
+                            FineGrainedLineageClass(
+                                upstreamType=FineGrainedLineageUpstreamTypeClass.FIELD_SET,
+                                downstreamType=FineGrainedLineageDownstreamTypeClass.FIELD,
+                                upstreams=[physical_field_urn],
+                                downstreams=[downstream_field_urn],
+                                transformOperation="OMNI_SEMANTIC_TO_PHYSICAL_MAPPING",
+                            )
+                        )
 
             all_upstreams = set(upstream_semantic_urns)
             all_upstreams.update(upstream_physical_urns)

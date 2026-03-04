@@ -38,5 +38,5 @@ datahub ingest -c recipes/omni_recipe.yml
 ## Notes
 
 - This is a V1 baseline focused on correctness and extension points.
-- It currently emits semantic and physical datasets, dashboards, and dataset-level lineage.
-- The fine-grained lineage map is prepared internally and can be expanded to full DataHub field-level aspect emission as a next step.
+- It emits semantic and physical datasets, native dashboards/charts, and dataset-level lineage.
+- It emits fine-grained lineage through DataHub `upstreamLineage` fine-grained entries when `enable_column_lineage` is set to true.
