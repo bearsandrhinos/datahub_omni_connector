@@ -1,0 +1,37 @@
+source:
+  type: omni
+  config:
+    env: PROD
+    base_url: "https://peter.omniapp.co/api"
+    api_key: "${OMNI_API_KEY}"
+    page_size: 50
+    max_requests_per_minute: 20
+    timeout_seconds: 30
+    include_deleted: false
+    include_workbook_only: false
+    enable_column_lineage: true
+    normalize_snowflake_names: true
+    # These IDs were discovered from Omni /v1/connections.
+    # Map Omni connection IDs to the exact DataHub Snowflake identity.
+    connection_to_platform:
+      2e2994be-d48e-4e67-b95e-860b746077e2: snowflake
+      65652162-29c0-4b19-a29f-b2513b44b302: snowflake
+      82d79d07-fe31-45cb-88e0-8a6580e825f2: snowflake
+      c967eb8c-2395-44ef-b89f-17bd4a4e8790: snowflake
+    connection_to_database:
+      2e2994be-d48e-4e67-b95e-860b746077e2: ANALYTICS_PROD
+      65652162-29c0-4b19-a29f-b2513b44b302: ANALYTICS_PROD
+      82d79d07-fe31-45cb-88e0-8a6580e825f2: ANALYTICS_PROD
+      c967eb8c-2395-44ef-b89f-17bd4a4e8790: ANALYTICS_PROD
+    # Optional but important if your Snowflake source used platform_instance.
+    # Replace "snowflake" below with your actual Snowflake platform instance name in DataHub.
+    connection_to_platform_instance:
+      2e2994be-d48e-4e67-b95e-860b746077e2: snowflake
+      65652162-29c0-4b19-a29f-b2513b44b302: snowflake
+      82d79d07-fe31-45cb-88e0-8a6580e825f2: snowflake
+      c967eb8c-2395-44ef-b89f-17bd4a4e8790: snowflake
+
+sink:
+  type: datahub-rest
+  config:
+    server: "http://localhost:8080"

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datahub-omni-connector"
+version = "0.1.0"
+description = "DataHub ingestion source for Omni metadata and lineage"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "acryl-datahub>=0.14.0",
+  "PyYAML>=6.0.1",
+  "requests>=2.31.0",
+]
+
+[project.entry-points."datahub.ingestion.source"]
+omni = "omni_source.source:OmniSource"
+
+[project.entry-points."datahub.ingestion.source.plugins"]
+omni = "omni_source.source:OmniSource"
+
+[tool.setuptools]
+packages = ["omni_source"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
