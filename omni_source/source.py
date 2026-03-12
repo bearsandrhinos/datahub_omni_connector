@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Set
 
 import yaml
@@ -41,7 +41,6 @@ from datahub.ingestion.api.decorators import (
 )
 from datahub.ingestion.api.source import (
     CapabilityReport,
-    SourceCapability,
     TestableSource,
     TestConnectionReport,
 )
@@ -54,25 +53,19 @@ from datahub.ingestion.source.state.stateful_ingestion_base import (
     StatefulIngestionSourceBase,
 )
 from datahub.metadata.schema_classes import (
-    AuditStampClass,
     BooleanTypeClass,
-    ChangeAuditStampsClass,
     DataPlatformInfoClass,
     DatasetLineageTypeClass,
-    DatasetPropertiesClass,
     FineGrainedLineageClass,
     FineGrainedLineageDownstreamTypeClass,
     FineGrainedLineageUpstreamTypeClass,
-    GlobalTagsClass,
     NumberTypeClass,
-    OtherSchemaClass,
     OwnerClass,
     OwnershipClass,
     OwnershipTypeClass,
     PlatformTypeClass,
     SchemaFieldClass,
     SchemaFieldDataTypeClass,
-    SchemaMetadataClass,
     StringTypeClass,
     SubTypesClass,
     UpstreamClass,
@@ -202,29 +195,6 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
             )
         )
 
-    def _emit_subtypes(self, entity_urn: str, subtypes: List[str]) -> Iterator[MetadataWorkUnit]:
-        yield self._as_wu(
-            MetadataChangeProposalWrapper(
-                entityUrn=entity_urn,
-                aspect=SubTypesClass(typeNames=subtypes),
-            )
-        )
-
-    def _emit_ownership(
-        self, entity_urn: str, owner_id: str, owner_name: str
-    ) -> Iterator[MetadataWorkUnit]:
-        if not owner_id and not owner_name:
-            return
-        urn = make_user_urn(owner_id or owner_name)
-        yield self._as_wu(
-            MetadataChangeProposalWrapper(
-                entityUrn=entity_urn,
-                aspect=OwnershipClass(
-                    owners=[OwnerClass(owner=urn, type=OwnershipTypeClass.DATAOWNER)]
-                ),
-            )
-        )
-
     def _emit_upstream_lineage(
         self,
         dataset_urn: str,
@@ -263,19 +233,6 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
         if any(t in lowered for t in ("int", "number", "numeric", "decimal", "float", "double")):
             return SchemaFieldDataTypeClass(type=NumberTypeClass())
         return SchemaFieldDataTypeClass(type=StringTypeClass())
-
-    def _audit_stamps(self, updated_at: Optional[str] = None) -> ChangeAuditStampsClass:
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        event_ms = now_ms
-        if updated_at:
-            try:
-                event_ms = int(
-                    datetime.fromisoformat(updated_at.replace("Z", "+00:00")).timestamp() * 1000
-                )
-            except Exception:
-                event_ms = now_ms
-        stamp = AuditStampClass(time=event_ms, actor=make_user_urn("omni_ingestion"))
-        return ChangeAuditStampsClass(created=stamp, lastModified=stamp)
 
     # ------------------------------------------------------------------
     # URN helpers
@@ -331,6 +288,7 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
         description: str,
         custom_properties: Dict[str, str],
         subtype: str,
+        display_name: Optional[str] = None,
         upstreams: Optional[UpstreamLineageClass] = None,
         schema_fields: Optional[List[SchemaFieldClass]] = None,
         owner_id: str = "",
@@ -343,6 +301,7 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
         dataset = Dataset(
             platform=platform,
             name=name,
+            display_name=display_name,
             platform_instance=platform_instance,
             env=self.config.env,
             description=description,
@@ -595,6 +554,7 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
         platform_instance: Optional[str],
         inferred: bool = False,
         model_custom_properties: Optional[Dict[str, str]] = None,
+        model_name: Optional[str] = None,
     ) -> Iterator[MetadataWorkUnit]:
         if not topic:
             return
@@ -620,8 +580,10 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
         if model_custom_properties:
             topic_props.update(model_custom_properties)
 
+        readable_model = model_name or model_id
         yield from self._emit_dataset(
             name=f"{model_id}.topic.{topic_name}",
+            display_name=f"{readable_model}.topic.{topic_name}",
             description="Omni topic entity.",
             custom_properties=topic_props,
             subtype="Topic",
@@ -740,6 +702,7 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
 
             yield from self._emit_dataset(
                 name=f"{model_id}.{view_name}",
+                display_name=f"{readable_model}.{view_name}",
                 description=f"Omni semantic view from topic {topic_name}.",
                 custom_properties=view_props,
                 subtype="View",
@@ -781,11 +744,12 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
                 continue
             self.report.models_scanned += 1
 
+            model_name = model.get("name") or model_id
             model_kind = model.get("modelKind")
             model_layer = self._normalize_model_layer(model_kind)
             model_props: Dict[str, str] = {
                 "modelId": model_id,
-                "modelName": model.get("name") or "",
+                "modelName": model_name,
                 "modelKind": model_kind or "",
                 "modelLayer": model_layer,
                 "baseModelId": model.get("baseModelId") or "",
@@ -898,6 +862,7 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
                         "modelKind": model_kind or "",
                         "modelLayer": model_layer,
                     },
+                    model_name=model_name,
                 )
 
     def _ingest_folders(self) -> Iterator[MetadataWorkUnit]:
@@ -928,7 +893,218 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
             )
             self._folder_dataset_urns.add(self._folder_dataset_urn(folder_id))
 
-    def _ingest_documents(self) -> Iterator[MetadataWorkUnit]:  # noqa: C901
+    # ------------------------------------------------------------------
+    # _ingest_documents helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_inline_folder(
+        self, folder_id: str, folder_name: str, folder_path: str
+    ) -> Iterator[MetadataWorkUnit]:
+        """Emit a folder dataset if it was inlined in the document and not yet seen."""
+        folder_urn = self._folder_dataset_urn(folder_id)
+        if folder_urn not in self._folder_dataset_urns:
+            yield from self._emit_dataset(
+                name=f"folder.{folder_id}",
+                description="Omni folder entity inferred from document metadata.",
+                custom_properties={
+                    "entityType": "folder",
+                    "folderId": folder_id,
+                    "folderName": folder_name,
+                    "folderPath": folder_path,
+                    "inferred": "true",
+                },
+                subtype="Folder",
+            )
+            self._folder_dataset_urns.add(folder_urn)
+
+    def _ingest_topic_from_dashboard(
+        self,
+        model_id: str,
+        topic_name: str,
+    ) -> Iterator[MetadataWorkUnit]:
+        """Fetch (or fall back to YAML) and ingest a topic referenced by a dashboard tile."""
+        ctx = self._model_context_by_id.get(model_id, {})
+        mcp = {
+            "modelKind": str(ctx.get("model_kind") or ""),
+            "modelLayer": str(ctx.get("model_layer") or ""),
+        }
+        kwargs = dict(
+            model_id=model_id,
+            topic_name=topic_name,
+            platform=str(ctx.get("platform") or "database"),
+            database=str(ctx.get("database") or ""),
+            connection_id=str(ctx.get("connection_id") or ""),
+            platform_instance=(
+                str(ctx.get("platform_instance")) if ctx.get("platform_instance") else None
+            ),
+            inferred=True,
+            model_custom_properties=mcp,
+        )
+        try:
+            tp = self.client.get_topic(model_id, topic_name)
+            if tp:
+                yield from self._ingest_topic_payload(topic=tp, **kwargs)  # type: ignore[arg-type]
+        except Exception as exc:
+            ts = self._topic_specs_by_model_id.get(model_id, {})
+            vs = self._view_specs_by_model_id.get(model_id, {})
+            yt = self._topic_payload_from_yaml_specs(topic_name, ts, vs)
+            if yt.get("views"):
+                yield from self._ingest_topic_payload(topic=yt, **kwargs)  # type: ignore[arg-type]
+            else:
+                self.report.report_warning(
+                    "topic-fetch-from-dashboard",
+                    f"Failed to fetch topic {topic_name} for model {model_id}: {exc}",
+                )
+
+    def _collect_tile_data(
+        self,
+        doc_id: str,
+        dashboard_url: str,
+        dashboard_title: str,
+        fields_by_dashboard: Set[Any],
+        chart_ids: List[str],
+        chart_inputs: Dict[str, Set[str]],
+        chart_titles: Dict[str, str],
+        chart_urls: Dict[str, str],
+        dashboard_topics: Set[str],
+        dashboard_topic_urns: Set[str],
+    ) -> Iterator[MetadataWorkUnit]:
+        """Fetch dashboard payload and populate tile/topic state dicts. Yields topic ingestion workunits."""
+        try:
+            dashboard_payload = self.client.get_dashboard_document(doc_id)
+            model_id = dashboard_payload.get("modelId")
+            for idx, qp in enumerate(dashboard_payload.get("queryPresentations", [])):
+                qp_id = qp.get("id") or f"{doc_id}:{idx}"
+                chart_ids.append(qp_id)
+                chart_inputs[qp_id] = set()
+                chart_titles[qp_id] = qp.get("name") or f"{dashboard_title} - tile {idx + 1}"
+                query = qp.get("query") or {}
+                fields_by_dashboard.update(parse_field_list(query.get("fields", [])))
+                topic_name = qp.get("topicName") or query.get("join_paths_from_topic_name")
+                if topic_name and model_id:
+                    dashboard_topics.add(topic_name)
+                    topic_key = f"{model_id}:{topic_name}"
+                    topic_urn = self._topic_urn_by_key.get(
+                        topic_key, self._topic_dataset_urn(model_id, topic_name)
+                    )
+                    if topic_key not in self._topic_urn_by_key:
+                        yield from self._ingest_topic_from_dashboard(model_id, topic_name)
+                        topic_urn = self._topic_urn_by_key.get(topic_key, topic_urn)
+                    if topic_urn not in self._topic_dataset_urns:
+                        self._topic_dataset_urns.add(topic_urn)
+                        yield from self._emit_dataset(
+                            name=f"{model_id}.topic.{topic_name}",
+                            description="Omni topic inferred from dashboard metadata.",
+                            custom_properties={
+                                "modelId": model_id,
+                                "topicName": topic_name,
+                                "inferred": "true",
+                            },
+                            subtype="Topic",
+                        )
+                        self.report.semantic_datasets_emitted += 1
+                    chart_inputs[qp_id].add(topic_urn)
+                    dashboard_topic_urns.add(topic_urn)
+                chart_urls[qp_id] = f"{dashboard_url}?queryPresentationId={qp_id}"
+            return model_id  # type: ignore[return-value]  # caller reads via StopIteration value
+        except Exception as exc:
+            self.report.report_warning(
+                "dashboard-document-fetch",
+                f"Failed to fetch dashboard payload for {doc_id}: {exc}",
+            )
+        return None  # type: ignore[return-value]
+
+    def _emit_inferred_view_datasets(
+        self,
+        doc_id: str,
+        model_id: str,
+        fields_by_dashboard: Set[Any],
+        dashboard_topic_urns: Set[str],
+        dashboard_dataset_urn: str,
+        fine_grained_lineages: List[FineGrainedLineageClass],
+        fine_grained_dedupe: Set[tuple],
+    ) -> Iterator[MetadataWorkUnit]:
+        """Emit inferred semantic view datasets and compute fine-grained lineage."""
+        inferred_fields_by_view: Dict[str, Set[str]] = {}
+        inferred_view_topic_links: Dict[str, Set[str]] = {}
+
+        for field_ref in fields_by_dashboard:
+            inferred_fields_by_view.setdefault(field_ref.view, set()).add(field_ref.field)
+            semantic_view_urn = self._semantic_dataset_urn(model_id, field_ref.view)
+            if semantic_view_urn not in self._semantic_dataset_urns:
+                self._semantic_dataset_urns.add(semantic_view_urn)
+                inferred_schema_fields = [
+                    SchemaFieldClass(
+                        fieldPath=fn,
+                        type=self._infer_schema_type("STRING"),
+                        nativeDataType="STRING",
+                        nullable=True,
+                    )
+                    for fn in sorted(inferred_fields_by_view.get(field_ref.view, set()))
+                ]
+                view_upstreams: Optional[UpstreamLineageClass] = None
+                if dashboard_topic_urns:
+                    view_upstreams = UpstreamLineageClass(
+                        upstreams=[
+                            UpstreamClass(dataset=t, type=DatasetLineageTypeClass.TRANSFORMED)
+                            for t in sorted(dashboard_topic_urns)
+                        ]
+                    )
+                yield from self._emit_dataset(
+                    name=f"{model_id}.{field_ref.view}",
+                    description="Omni semantic view inferred from dashboard query fields.",
+                    custom_properties={
+                        "modelId": model_id,
+                        "viewName": field_ref.view,
+                        "inferred": "true",
+                    },
+                    subtype="View",
+                    schema_fields=inferred_schema_fields or None,
+                    upstreams=view_upstreams,
+                )
+                self.report.semantic_datasets_emitted += 1
+            elif dashboard_topic_urns:
+                inferred_view_topic_links.setdefault(semantic_view_urn, set()).update(
+                    dashboard_topic_urns
+                )
+
+            if not self.config.include_column_lineage:
+                continue
+
+            key = self._canonical_semantic_field_key(model_id, field_ref.view, field_ref.field)
+            semantic_field = self._semantic_fields.get(key)
+            downstream_field_urn = make_schema_field_urn(
+                dashboard_dataset_urn, f"{field_ref.view}.{field_ref.field}"
+            )
+            if not semantic_field:
+                self.report.fine_grained_lineage_edges_unresolved += 1
+                continue
+            semantic_urn = self._semantic_dataset_urn(semantic_field.model_id, semantic_field.view_name)
+            semantic_field_urn = make_schema_field_urn(semantic_urn, semantic_field.field_name)
+            edge = (tuple([semantic_field_urn]), tuple([downstream_field_urn]))
+            if edge not in fine_grained_dedupe:
+                fine_grained_dedupe.add(edge)
+                fine_grained_lineages.append(
+                    FineGrainedLineageClass(
+                        upstreamType=FineGrainedLineageUpstreamTypeClass.FIELD_SET,
+                        downstreamType=FineGrainedLineageDownstreamTypeClass.FIELD,
+                        upstreams=[semantic_field_urn],
+                        downstreams=[downstream_field_urn],
+                        transformOperation="OMNI_QUERY_FIELD_MAPPING",
+                    )
+                )
+            if semantic_field.confidence == "exact":
+                self.report.fine_grained_lineage_edges_exact += 1
+            elif semantic_field.confidence == "derived":
+                self.report.fine_grained_lineage_edges_derived += 1
+            else:
+                self.report.fine_grained_lineage_edges_unresolved += 1
+
+        for sv_urn, topic_ups in inferred_view_topic_links.items():
+            if topic_ups:
+                yield from self._emit_upstream_lineage(sv_urn, topic_ups)
+
+    def _ingest_documents(self) -> Iterator[MetadataWorkUnit]:
         for document in self.client.list_documents(
             page_size=self.config.page_size,
             include_deleted=self.config.include_deleted,
@@ -946,8 +1122,6 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
                 continue
 
             dashboard_dataset_urn = make_dataset_urn(self.PLATFORM, doc_id, self.config.env)
-
-            # Emit subTypes for the dataset projection so the entity is discoverable.
             yield self._as_wu(
                 MetadataChangeProposalWrapper(
                     entityUrn=dashboard_dataset_urn,
@@ -972,30 +1146,11 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
                 str(lb.get("name") if isinstance(lb, dict) else lb)
                 for lb in (labels if isinstance(labels, list) else [])
             ]
-            embed_url = dashboard_url
-
             self.report.dashboards_scanned += 1
 
-            # Ensure inlined folder is tracked
-            folder_urn: Optional[str] = None
             if folder_id:
-                folder_urn = self._folder_dataset_urn(folder_id)
-                if folder_urn not in self._folder_dataset_urns:
-                    yield from self._emit_dataset(
-                        name=f"folder.{folder_id}",
-                        description="Omni folder entity inferred from document metadata.",
-                        custom_properties={
-                            "entityType": "folder",
-                            "folderId": folder_id,
-                            "folderName": folder_name,
-                            "folderPath": folder_path,
-                            "inferred": "true",
-                        },
-                        subtype="Folder",
-                    )
-                    self._folder_dataset_urns.add(folder_urn)
+                yield from self._ensure_inline_folder(folder_id, folder_name, folder_path)
 
-            # Ensure connection entity exists
             document_connection_id = str(document.get("connectionId") or "")
             if document_connection_id:
                 yield from self._ensure_connection_dataset(
@@ -1003,8 +1158,7 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
                     self._connections_by_id.get(document_connection_id),
                 )
 
-            # ----- collect tiles and per-tile topic links -----
-            fields_by_dashboard: Set[FieldRef] = set()
+            fields_by_dashboard: Set[Any] = set()
             fine_grained_lineages: List[FineGrainedLineageClass] = []
             fine_grained_dedupe: Set[tuple] = set()
             chart_ids: List[str] = []
@@ -1013,100 +1167,20 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
             chart_inputs: Dict[str, Set[str]] = {}
             chart_titles: Dict[str, str] = {}
             chart_urls: Dict[str, str] = {}
-            inferred_fields_by_view: Dict[str, Set[str]] = {}
-            inferred_view_topic_links: Dict[str, Set[str]] = {}
             dashboard_topic_urns: Set[str] = set()
 
             if has_dashboard:
+                tile_gen = self._collect_tile_data(
+                    doc_id, dashboard_url, dashboard_title,
+                    fields_by_dashboard, chart_ids, chart_inputs, chart_titles,
+                    chart_urls, dashboard_topics, dashboard_topic_urns,
+                )
+                # Exhaust the generator to populate state; capture model_id via StopIteration
                 try:
-                    dashboard_payload = self.client.get_dashboard_document(doc_id)
-                    model_id_from_dashboard = dashboard_payload.get("modelId")
-                    for idx, qp in enumerate(dashboard_payload.get("queryPresentations", [])):
-                        qp_id = qp.get("id") or f"{doc_id}:{idx}"
-                        chart_ids.append(qp_id)
-                        chart_inputs[qp_id] = set()
-                        chart_titles[qp_id] = qp.get("name") or f"{dashboard_title} - tile {idx + 1}"
-                        query = qp.get("query") or {}
-                        fields_by_dashboard.update(parse_field_list(query.get("fields", [])))
-                        topic_name = qp.get("topicName") or query.get("join_paths_from_topic_name")
-                        if topic_name:
-                            dashboard_topics.add(topic_name)
-                            if model_id_from_dashboard:
-                                topic_key = f"{model_id_from_dashboard}:{topic_name}"
-                                topic_urn = self._topic_urn_by_key.get(
-                                    topic_key,
-                                    self._topic_dataset_urn(model_id_from_dashboard, topic_name),
-                                )
-                                if topic_key not in self._topic_urn_by_key:
-                                    ctx = self._model_context_by_id.get(model_id_from_dashboard, {})
-                                    mcp = {
-                                        "modelKind": str(ctx.get("model_kind") or ""),
-                                        "modelLayer": str(ctx.get("model_layer") or ""),
-                                    }
-                                    try:
-                                        tp = self.client.get_topic(model_id_from_dashboard, topic_name)
-                                        if tp:
-                                            yield from self._ingest_topic_payload(
-                                                model_id=model_id_from_dashboard,
-                                                topic_name=topic_name,
-                                                topic=tp,
-                                                platform=str(ctx.get("platform") or "database"),
-                                                database=str(ctx.get("database") or ""),
-                                                connection_id=str(ctx.get("connection_id") or ""),
-                                                platform_instance=(
-                                                    str(ctx.get("platform_instance"))
-                                                    if ctx.get("platform_instance") else None
-                                                ),
-                                                inferred=True,
-                                                model_custom_properties=mcp,
-                                            )
-                                            topic_urn = self._topic_urn_by_key.get(topic_key, topic_urn)
-                                    except Exception as exc:
-                                        ts = self._topic_specs_by_model_id.get(model_id_from_dashboard, {})
-                                        vs = self._view_specs_by_model_id.get(model_id_from_dashboard, {})
-                                        yt = self._topic_payload_from_yaml_specs(topic_name, ts, vs)
-                                        if yt.get("views"):
-                                            yield from self._ingest_topic_payload(
-                                                model_id=model_id_from_dashboard,
-                                                topic_name=topic_name,
-                                                topic=yt,
-                                                platform=str(ctx.get("platform") or "database"),
-                                                database=str(ctx.get("database") or ""),
-                                                connection_id=str(ctx.get("connection_id") or ""),
-                                                platform_instance=(
-                                                    str(ctx.get("platform_instance"))
-                                                    if ctx.get("platform_instance") else None
-                                                ),
-                                                inferred=True,
-                                                model_custom_properties=mcp,
-                                            )
-                                            topic_urn = self._topic_urn_by_key.get(topic_key, topic_urn)
-                                        else:
-                                            self.report.report_warning(
-                                                "topic-fetch-from-dashboard",
-                                                f"Failed to fetch topic {topic_name} for model {model_id_from_dashboard}: {exc}",
-                                            )
-                                if topic_urn not in self._topic_dataset_urns:
-                                    self._topic_dataset_urns.add(topic_urn)
-                                    yield from self._emit_dataset(
-                                        name=f"{model_id_from_dashboard}.topic.{topic_name}",
-                                        description="Omni topic inferred from dashboard metadata.",
-                                        custom_properties={
-                                            "modelId": model_id_from_dashboard,
-                                            "topicName": topic_name,
-                                            "inferred": "true",
-                                        },
-                                        subtype="Topic",
-                                    )
-                                    self.report.semantic_datasets_emitted += 1
-                                chart_inputs[qp_id].add(topic_urn)
-                                dashboard_topic_urns.add(topic_urn)
-                        chart_urls[qp_id] = f"{dashboard_url}?queryPresentationId={qp_id}"
-                except Exception as exc:
-                    self.report.report_warning(
-                        "dashboard-document-fetch",
-                        f"Failed to fetch dashboard payload for {doc_id}: {exc}",
-                    )
+                    while True:
+                        yield next(tile_gen)
+                except StopIteration as si:
+                    model_id_from_dashboard = si.value
 
             try:
                 for query in self.client.get_document_queries(doc_id):
@@ -1121,7 +1195,6 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
                     f"Failed to fetch queries for {doc_id}: {exc}",
                 )
 
-            # Backfill tile → topic when modelId was only learned from queries
             if model_id_from_dashboard and dashboard_topics:
                 for topic_name in sorted(dashboard_topics):
                     topic_key = f"{model_id_from_dashboard}:{topic_name}"
@@ -1132,91 +1205,18 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
                     for qp_id in chart_ids:
                         chart_inputs.setdefault(qp_id, set()).add(topic_urn)
 
-            # ----- inferred views from query fields -----
-            for field_ref in fields_by_dashboard:
-                inferred_fields_by_view.setdefault(field_ref.view, set()).add(field_ref.field)
-                if not model_id_from_dashboard:
-                    continue
-                semantic_view_urn = self._semantic_dataset_urn(model_id_from_dashboard, field_ref.view)
-                if semantic_view_urn not in self._semantic_dataset_urns:
-                    self._semantic_dataset_urns.add(semantic_view_urn)
-                    inferred_schema_fields = [
-                        SchemaFieldClass(
-                            fieldPath=fn,
-                            type=self._infer_schema_type("STRING"),
-                            nativeDataType="STRING",
-                            nullable=True,
-                        )
-                        for fn in sorted(inferred_fields_by_view.get(field_ref.view, set()))
-                    ]
-                    view_upstreams: Optional[UpstreamLineageClass] = None
-                    if dashboard_topic_urns:
-                        view_upstreams = UpstreamLineageClass(
-                            upstreams=[
-                                UpstreamClass(dataset=t, type=DatasetLineageTypeClass.TRANSFORMED)
-                                for t in sorted(dashboard_topic_urns)
-                            ]
-                        )
-                    yield from self._emit_dataset(
-                        name=f"{model_id_from_dashboard}.{field_ref.view}",
-                        description="Omni semantic view inferred from dashboard query fields.",
-                        custom_properties={
-                            "modelId": model_id_from_dashboard,
-                            "viewName": field_ref.view,
-                            "inferred": "true",
-                        },
-                        subtype="View",
-                        schema_fields=inferred_schema_fields or None,
-                        upstreams=view_upstreams,
-                    )
-                    self.report.semantic_datasets_emitted += 1
-                elif dashboard_topic_urns:
-                    inferred_view_topic_links.setdefault(semantic_view_urn, set()).update(
-                        dashboard_topic_urns
-                    )
-
-                # Fine-grained lineage: dashboard field → semantic view field
-                key = self._canonical_semantic_field_key(
-                    model_id_from_dashboard, field_ref.view, field_ref.field
+            if model_id_from_dashboard and fields_by_dashboard:
+                yield from self._emit_inferred_view_datasets(
+                    doc_id=doc_id,
+                    model_id=model_id_from_dashboard,
+                    fields_by_dashboard=fields_by_dashboard,
+                    dashboard_topic_urns=dashboard_topic_urns,
+                    dashboard_dataset_urn=dashboard_dataset_urn,
+                    fine_grained_lineages=fine_grained_lineages,
+                    fine_grained_dedupe=fine_grained_dedupe,
                 )
-                semantic_field = self._semantic_fields.get(key)
-                if semantic_field:
-                    semantic_urn = self._semantic_dataset_urn(
-                        semantic_field.model_id, semantic_field.view_name
-                    )
 
-                if self.config.include_column_lineage:
-                    downstream_field_urn = make_schema_field_urn(
-                        dashboard_dataset_urn, f"{field_ref.view}.{field_ref.field}"
-                    )
-                    if not semantic_field:
-                        self.report.fine_grained_lineage_edges_unresolved += 1
-                        continue
-                    semantic_field_urn = make_schema_field_urn(semantic_urn, semantic_field.field_name)
-                    edge = (tuple([semantic_field_urn]), tuple([downstream_field_urn]))
-                    if edge not in fine_grained_dedupe:
-                        fine_grained_dedupe.add(edge)
-                        fine_grained_lineages.append(
-                            FineGrainedLineageClass(
-                                upstreamType=FineGrainedLineageUpstreamTypeClass.FIELD_SET,
-                                downstreamType=FineGrainedLineageDownstreamTypeClass.FIELD,
-                                upstreams=[semantic_field_urn],
-                                downstreams=[downstream_field_urn],
-                                transformOperation="OMNI_QUERY_FIELD_MAPPING",
-                            )
-                        )
-                    if semantic_field.confidence == "exact":
-                        self.report.fine_grained_lineage_edges_exact += 1
-                    elif semantic_field.confidence == "derived":
-                        self.report.fine_grained_lineage_edges_derived += 1
-                    else:
-                        self.report.fine_grained_lineage_edges_unresolved += 1
-
-            for sv_urn, topic_ups in inferred_view_topic_links.items():
-                if topic_ups:
-                    yield from self._emit_upstream_lineage(sv_urn, topic_ups)
-
-            # ----- dashboard dataset projection (for lineage stitching) -----
+            folder_urn: Optional[str] = self._folder_dataset_urn(folder_id) if folder_id else None
             structural_upstreams: Set[str] = set()
             if folder_id:
                 structural_upstreams.add(self._folder_dataset_urn(folder_id))
@@ -1227,25 +1227,22 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
                     fine_grained_lineages=fine_grained_lineages,
                 )
 
-            # ----- emit charts (SDK V2) -----
             chart_urns: List[str] = []
             for qp_id in chart_ids:
                 chart_urn = make_chart_urn(self.PLATFORM, qp_id)
                 chart_urns.append(chart_urn)
-                input_urns = sorted(chart_inputs.get(qp_id, set()))
                 yield from self._emit_chart(
                     qp_id=qp_id,
                     title=chart_titles.get(qp_id, "Omni tile"),
                     description="Omni workbook tab or dashboard tile.",
                     external_url=chart_urls.get(qp_id, dashboard_url),
-                    input_urns=input_urns,
+                    input_urns=sorted(chart_inputs.get(qp_id, set())),
                     custom_properties={"documentId": doc_id},
                     owner_id=owner_id,
                     owner_name=owner_name,
                     updated_at=document.get("updatedAt"),
                 )
 
-            # ----- emit dashboard (SDK V2) -----
             yield from self._emit_dashboard(
                 doc_id=doc_id,
                 title=dashboard_title,
@@ -1260,8 +1257,8 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
                     "folderName": folder_name,
                     "folderPath": folder_path,
                     "labels": ",".join(lb for lb in normalized_labels if lb),
-                    "omniEmbedUrl": embed_url,
-                    "omniEmbedIframe": f'<iframe src="{embed_url}"></iframe>',
+                    "omniEmbedUrl": str(dashboard_url),
+                    "omniEmbedIframe": f'<iframe src="{dashboard_url}"></iframe>',
                     "topicNames": ",".join(sorted(dashboard_topics)),
                     "updatedAt": document.get("updatedAt") or "",
                 },

@@ -229,6 +229,7 @@
         "modelKind": "SHARED",
         "modelLayer": "shared"
       },
+      "name": "Analytics Shared Model.topic.customers",
       "tags": []
     }
   },
@@ -435,6 +436,7 @@
         "modelKind": "SHARED",
         "modelLayer": "shared"
       },
+      "name": "Analytics Shared Model.customers",
       "tags": []
     }
   },
@@ -493,6 +495,7 @@
         "modelKind": "SHARED",
         "modelLayer": "shared"
       },
+      "name": "Analytics Shared Model.topic.orders",
       "tags": []
     }
   },
@@ -699,6 +702,7 @@
         "modelKind": "SHARED",
         "modelLayer": "shared"
       },
+      "name": "Analytics Shared Model.orders",
       "tags": []
     }
   },
@@ -893,6 +897,7 @@
         "modelKind": "SHARED",
         "modelLayer": "shared"
       },
+      "name": "Analytics Shared Model.order_items",
       "tags": []
     }
   },
@@ -1129,18 +1134,6 @@
         {
           "upstreamType": "FIELD_SET",
           "upstreams": [
-            "urn:li:schemaField:(urn:li:dataset:(urn:li:dataPlatform:omni,shared-model-1.customers,PROD),customer_id)"
-          ],
-          "downstreamType": "FIELD",
-          "downstreams": [
-            "urn:li:schemaField:(urn:li:dataset:(urn:li:dataPlatform:omni,doc-dashboard-1,PROD),customers.customer_id)"
-          ],
-          "transformOperation": "OMNI_QUERY_FIELD_MAPPING",
-          "confidenceScore": 1.0
-        },
-        {
-          "upstreamType": "FIELD_SET",
-          "upstreams": [
             "urn:li:schemaField:(urn:li:dataset:(urn:li:dataPlatform:omni,shared-model-1.orders,PROD),created_at)"
           ],
           "downstreamType": "FIELD",
@@ -1158,6 +1151,18 @@
           "downstreamType": "FIELD",
           "downstreams": [
             "urn:li:schemaField:(urn:li:dataset:(urn:li:dataPlatform:omni,doc-dashboard-1,PROD),customers.lifetime_value)"
+          ],
+          "transformOperation": "OMNI_QUERY_FIELD_MAPPING",
+          "confidenceScore": 1.0
+        },
+        {
+          "upstreamType": "FIELD_SET",
+          "upstreams": [
+            "urn:li:schemaField:(urn:li:dataset:(urn:li:dataPlatform:omni,shared-model-1.customers,PROD),customer_id)"
+          ],
+          "downstreamType": "FIELD",
+          "downstreams": [
+            "urn:li:schemaField:(urn:li:dataset:(urn:li:dataPlatform:omni,doc-dashboard-1,PROD),customers.customer_id)"
           ],
           "transformOperation": "OMNI_QUERY_FIELD_MAPPING",
           "confidenceScore": 1.0

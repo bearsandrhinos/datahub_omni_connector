@@ -1,10 +1,12 @@
 from dataclasses import dataclass
 
-from datahub.ingestion.api.source import SourceReport
+from datahub.ingestion.source.state.stale_entity_removal_handler import (
+    StaleEntityRemovalSourceReport,
+)
 
 
 @dataclass
-class OmniSourceReport(SourceReport):
+class OmniSourceReport(StaleEntityRemovalSourceReport):
     connections_scanned: int = 0
     models_scanned: int = 0
     topics_scanned: int = 0
