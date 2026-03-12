@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": {
+    "datahub-connector-planning": {
+      "source": "datahub-project/datahub-skills",
+      "sourceType": "github",
+      "computedHash": "f087f43aa2d85b2a5c51b6ea8bf9df83e0d809020fc5ef61be52bca1d0cbe4c0"
+    },
+    "datahub-connector-pr-review": {
+      "source": "datahub-project/datahub-skills",
+      "sourceType": "github",
+      "computedHash": "61e2fb0fc8c270a96d343833ded0720737e1bcb244f41b6135da284db2b86dc5"
+    }
+  }
+}

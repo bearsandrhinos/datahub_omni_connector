@@ -9,7 +9,7 @@ source:
     timeout_seconds: 30
     include_deleted: false
     include_workbook_only: false
-    enable_column_lineage: true
+    include_column_lineage: true
     normalize_snowflake_names: true
     # These IDs were discovered from Omni /v1/connections.
     # Map Omni connection IDs to the exact DataHub Snowflake identity.

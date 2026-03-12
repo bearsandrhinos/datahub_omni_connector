@@ -8,16 +8,30 @@ version = "0.1.0"
 description = "DataHub ingestion source for Omni metadata and lineage"
 readme = "README.md"
 requires-python = ">=3.9"
+# Core runtime dependencies — mirrors what would appear in
+# metadata-ingestion/setup.py under extras["omni"] in the OSS repo.
 dependencies = [
   "acryl-datahub>=0.14.0",
   "PyYAML>=6.0.1",
   "requests>=2.31.0",
+  "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+# Development / test extras
+dev = [
+  "pytest>=7.0",
+  "pytest-cov>=4.0",
+  "time-machine>=2.9",
+  "deepdiff>=6.0",
+  "freezegun>=1.2",
 ]
 
 [project.entry-points."datahub.ingestion.source"]
-omni = "omni_source.source:OmniSource"
-
-[project.entry-points."datahub.ingestion.source.plugins"]
+# Registered as "omni" so recipes use `type: omni`.
+# In the DataHub OSS repo this entry lives in metadata-ingestion/setup.py
+# under entry_points["datahub.ingestion.source"] = ["omni = datahub.ingestion.source.omni.omni:OmniSource"].
+# The local module path (omni_source.source) is used here for standalone dev/testing.
 omni = "omni_source.source:OmniSource"
 
 [tool.setuptools]
@@ -26,3 +40,11 @@ packages = ["omni_source"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["omni_source"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

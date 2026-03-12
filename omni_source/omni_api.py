@@ -1,14 +1,21 @@
 import time
 from typing import Any, Dict, Iterator, List, Optional
 
+import pydantic
 import requests
 
 
-class OmniAPIClient:
+class OmniClient:
+    """HTTP client for the Omni REST API.
+
+    Handles authentication, client-side rate limiting, exponential-backoff
+    retries on 429 / 5xx responses, and cursor-based pagination.
+    """
+
     def __init__(
         self,
         base_url: str,
-        api_key: str,
+        api_key: pydantic.SecretStr,
         timeout_seconds: int = 30,
         max_requests_per_minute: int = 50,
     ) -> None:
@@ -19,7 +26,7 @@ class OmniAPIClient:
         self._session = requests.Session()
         self._session.headers.update(
             {
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {api_key.get_secret_value()}",
                 "Content-Type": "application/json",
             }
         )
@@ -57,7 +64,7 @@ class OmniAPIClient:
         self, path: str, params: Optional[Dict[str, Any]] = None
     ) -> Iterator[Dict[str, Any]]:
         query = dict(params or {})
-        seen_cursors = set()
+        seen_cursors: set = set()
         page_count = 0
         while True:
             page_count += 1
@@ -76,6 +83,14 @@ class OmniAPIClient:
             query["cursor"] = next_cursor
             if page_count >= 1000:
                 break
+
+    def test_connection(self) -> bool:
+        """Verify credentials are accepted by the Omni API."""
+        try:
+            self._request("GET", "/v1/models")
+            return True
+        except Exception:
+            return False
 
     def list_connections(self, include_deleted: bool = False) -> List[Dict[str, Any]]:
         params = {"includeDeleted": str(include_deleted).lower()}
@@ -110,3 +125,7 @@ class OmniAPIClient:
 
     def list_folders(self, page_size: int = 50) -> Iterator[Dict[str, Any]]:
         yield from self.paginate_records("/v1/folders", params={"pageSize": page_size})
+
+
+# Backwards-compatibility alias used in some tests
+OmniAPIClient = OmniClient

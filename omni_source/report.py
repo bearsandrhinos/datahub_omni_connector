@@ -5,6 +5,7 @@ from datahub.ingestion.api.source import SourceReport
 
 @dataclass
 class OmniSourceReport(SourceReport):
+    connections_scanned: int = 0
     models_scanned: int = 0
     topics_scanned: int = 0
     documents_scanned: int = 0

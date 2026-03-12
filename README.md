@@ -1,109 +1,149 @@
-# DataHub Omni Connector (V1 Scaffold)
+# DataHub Omni Connector
 
-This repository contains a V1 scaffold of a custom DataHub ingestion connector for Omni.
+A DataHub ingestion connector for [Omni](https://omni.co/) — extracts folders, dashboards, charts, semantic models, topics, views, and physical warehouse tables with full upstream lineage.
 
-## What is included
+## Repository layout
 
-- `omni_source/config.py`: DataHub source config model.
-- `omni_source/report.py`: Source report with lineage counters.
-- `omni_source/omni_api.py`: Omni API client with pagination and retries.
-- `omni_source/lineage_parser.py`: Field reference parser for column-level lineage.
-- `omni_source/source.py`: DataHub source implementation with V1 ingestion flow.
-- `recipes/omni_recipe.yml`: Sample ingestion recipe.
-- `tests/test_lineage_parser.py`: Unit tests for parser behavior.
-- `tests/test_source_behavior.py`: Unit tests for fallback and lineage behavior.
+```
+omni_source/
+  config.py           # Pydantic V2 config model (AllowDenyPattern, SecretStr)
+  report.py           # SourceReport with lineage and entity counters
+  omni_api.py         # Omni REST API client (pagination, rate limiting, retries)
+  lineage_parser.py   # Field reference parser for column-level lineage
+  source.py           # DataHub source (StatefulIngestionSourceBase + TestableSource)
+
+tests/
+  test_lineage_parser.py              # Unit tests: lineage parser
+  test_source_behavior.py             # Unit tests: fallback and lineage behavior
+  integration/omni/
+    fixtures.py                       # Deterministic fake Omni API client
+    test_omni_integration.py          # Integration tests + golden file comparison
+    omni_mces_golden.json             # Expected output snapshot
+
+docs/sources/omni.md                  # OSS-format documentation page
+recipes/omni_recipe.yml               # Sample ingestion recipe
+```
 
 ## Install
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[dev]"
 ```
 
-## Run tests
+## Configure credentials
 
-```bash
-pip install pytest
-pytest
+Edit `recipes/omni_recipe.yml` and set your values:
+
+```yaml
+source:
+  type: omni
+  config:
+    base_url: "https://your-org.omni.co"
+    api_key: "your-api-key-here"
 ```
 
-## Sample recipe
+Or export the key as an environment variable and reference it:
 
-Update `recipes/omni_recipe.yml` with your Omni URL and API key, then run:
+```yaml
+api_key: "${OMNI_API_KEY}"
+```
+
+## Run ingestion
 
 ```bash
 datahub ingest -c recipes/omni_recipe.yml
 ```
 
-## Omni hierarchy emitted by this connector
+## Run tests
 
-This connector models Omni objects as a BI lineage graph in DataHub:
+```bash
+# All tests
+pytest
 
-1. Omni **Document** with dashboard content
-   - Emitted as a native DataHub `Dashboard`
-   - Also emitted as a dataset projection for compatibility with dataset-based lineage views
-2. Omni **Query Presentation** (workbook tab / dashboard tile)
-   - Emitted as a native DataHub `Chart`
-3. Omni **Topic**
-   - Emitted as Omni dataset (`model_id.topic.topic_name`)
-4. Omni **View** inside topic
-   - Emitted as Omni dataset (`model_id.view_name`)
-5. Physical warehouse table (`database.schema.table`)
-   - Emitted as dataset on the mapped platform/dialect from Omni connection metadata
+# With coverage
+pytest --cov=omni_source --cov-report=term-missing
 
-In short:
+# Regenerate the golden file after source changes
+pytest tests/integration/omni/test_omni_integration.py --update-golden-files
+```
 
-- `Dashboard -> Chart -> Topic -> View -> Physical Table`
+## Omni object hierarchy
 
-## Lineage behavior
+The connector emits the following five-hop lineage chain:
 
-### Coarse lineage
+```
+Folder
+  └── Dashboard  (native DataHub Dashboard + dataset projection)
+        └── Chart  (dashboard tile / workbook query)
+              └── Topic  (Omni semantic topic)
+                    └── Semantic View  (Omni view with fields)
+                          └── Physical Table  (warehouse: Snowflake, BigQuery, Redshift, …)
+```
 
-The connector emits dataset-level upstream lineage for:
+### Entity mapping
 
-- Topic upstreams: all views in that topic
-- View upstreams: mapped physical tables (`database.schema.table`)
-- Dashboard dataset projection upstreams: semantic views, topics, and resolved physical tables
-- Chart inputs: topic/view inputs plus resolved physical tables
+| Omni Object | DataHub Type | subType |
+|---|---|---|
+| Folder | Dataset | `Folder` |
+| Dashboard document | Dashboard + Dataset | `Dashboard` |
+| Workbook document | Dataset | `Workbook` |
+| Query / tile | Chart | — |
+| Topic | Dataset | `Topic` |
+| Semantic View | Dataset | `View` |
+| Warehouse table | Dataset (native platform) | — |
 
-### Fine-grained (column-level) lineage
+## Metadata coverage
 
-When `enable_column_lineage: true`, the connector emits field-level lineage using `UpstreamLineage.fineGrainedLineages`:
+- **Folders**: name, path, scope, owner metadata, URL
+- **Dashboards / workbooks**: name, URL, owner, folder, updated timestamp, embed URL
+- **Models**: model ID/name, `modelKind` (`SHARED` / `WORKBOOK` / `SCHEMA`), `modelLayer`, `baseModelId`, connection ID
+- **Views / topics**: view names, dimension and measure fields, field types, SQL expressions
+- **Lineage**: coarse dataset-level + optional fine-grained column-level
+- **Ownership**: document owner → Dashboard and Chart entities
 
-- `semantic_view.field -> dashboard_projection.view.field`
-- `physical_table.field -> dashboard_projection.view.field`
+## Shared vs workbook model layers
 
-When `enable_column_lineage: false`, field-level edges are skipped, but coarse physical upstream lineage is still emitted.
+The connector distinguishes Omni model layers via `modelKind` and emits:
 
-### Fallbacks for incomplete Omni metadata
+- `modelKind` — raw Omni value (`SHARED`, `WORKBOOK`, `SCHEMA`)
+- `modelLayer` — normalised (`shared`, `workbook`, `schema`, `branch`, `unknown`)
+- `baseModelId` — for workbook models that extend an upstream shared model
 
-If model YAML does not expose topic names, the connector still attempts lineage hydration from dashboard metadata:
+## Column-level lineage
 
-- Uses dashboard/query `topicName` and query field references
-- Fetches topic payload directly
-- Backfills topic/view/physical-table lineage where possible
+When `include_column_lineage: true` (default), the connector emits `FineGrainedLineage` entries:
 
-If `/v1/connections` is forbidden, ingestion continues with config overrides and defaults instead of hard-failing.
+```
+physical_table.column  →  semantic_view.field
+```
 
-## Warehouse stitching guidance
+Set `include_column_lineage: false` to emit only coarse dataset-level lineage.
 
-To stitch Omni lineage to already-ingested warehouse/database assets, table URNs must match exactly:
+## Warehouse stitching
 
-- `platform`
-- `platform_instance` (if used by your upstream source)
-- `env`
-- dataset name format (`database.schema.table`)
+To align Omni physical table URNs with those already ingested from your warehouse source:
 
-Use these config mappings when needed:
+| Config key | Purpose |
+|---|---|
+| `connection_to_platform` | Map Omni connection ID → DataHub platform (e.g. `snowflake`) |
+| `connection_to_platform_instance` | Map Omni connection ID → platform instance name |
+| `connection_to_database` | Override the database name inferred from the connection |
+| `normalize_snowflake_names` | Uppercase `database.schema.table` for Snowflake matching |
 
-- `connection_to_platform`
-- `connection_to_platform_instance`
-- `connection_to_database`
-- `normalize_snowflake_names` (applies only when platform is `snowflake`)
+If `/v1/connections` returns `403 Forbidden`, ingestion continues using config overrides and defaults.
 
-## Notes
+## OSS wiring notes (for DataHub PR)
 
-- This is a V1 baseline focused on correctness and extension points.
-- It emits semantic and physical datasets, native dashboards/charts, and dataset-level lineage.
-- It emits fine-grained lineage through DataHub `upstreamLineage` fine-grained entries when `enable_column_lineage` is set to true.
+In the DataHub OSS repository (`metadata-ingestion/setup.py`), add:
+
+```python
+# Under extras:
+"omni": ["PyYAML>=6.0.1", "requests>=2.31.0"],
+
+# Under entry_points["datahub.ingestion.source"]:
+"omni = datahub.ingestion.source.omni.omni:OmniSource",
+```
+
+See [`docs/sources/omni.md`](docs/sources/omni.md) for the full OSS documentation page.

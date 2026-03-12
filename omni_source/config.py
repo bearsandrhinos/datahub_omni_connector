@@ -1,16 +1,24 @@
 from typing import Dict, List, Optional
 
+import pydantic
 from pydantic import Field
 
-from datahub.configuration.common import ConfigModel
+from datahub.configuration.common import AllowDenyPattern, ConfigModel
+from datahub.configuration.source_common import EnvConfigMixin, PlatformInstanceConfigMixin
+from datahub.ingestion.source.state.stateful_ingestion_base import (
+    StatefulIngestionConfigBase,
+)
 
 
-class OmniSourceConfig(ConfigModel):
-    env: str = Field(default="PROD", description="DataHub environment name.")
+class OmniSourceConfig(
+    StatefulIngestionConfigBase,
+    PlatformInstanceConfigMixin,
+    EnvConfigMixin,
+):
     base_url: str = Field(
-        description="Omni instance URL including /api, for example https://myorg.omniapp.co/api."
+        description="Omni instance URL including /api, e.g. https://myorg.omniapp.co/api."
     )
-    api_key: str = Field(description="Omni Organization API key.")
+    api_key: pydantic.SecretStr = Field(description="Omni Organization API key.")
     page_size: int = Field(
         default=50, ge=1, le=100, description="Page size for paginated Omni endpoints."
     )
@@ -25,21 +33,24 @@ class OmniSourceConfig(ConfigModel):
     )
     include_workbook_only: bool = Field(
         default=False,
-        description="Include workbook-only documents without dashboards.",
+        description="Include workbook-only documents that do not have a published dashboard.",
     )
-    model_allowlist: Optional[List[str]] = Field(
-        default=None, description="Optional list of model IDs to ingest."
+    # Standard AllowDenyPattern filters replace the old flat allowlists.
+    model_pattern: AllowDenyPattern = Field(
+        default=AllowDenyPattern.allow_all(),
+        description="Regex allow/deny patterns for Omni model IDs to ingest.",
     )
-    document_allowlist: Optional[List[str]] = Field(
-        default=None, description="Optional list of document identifiers to ingest."
+    document_pattern: AllowDenyPattern = Field(
+        default=AllowDenyPattern.allow_all(),
+        description="Regex allow/deny patterns for Omni document identifiers to ingest.",
     )
-    enable_column_lineage: bool = Field(
+    include_column_lineage: bool = Field(
         default=True,
-        description="Enable column-level lineage resolution in the source pipeline.",
+        description="Include column-level (fine-grained) lineage from dashboard fields back to Omni semantic view fields.",
     )
     connection_to_platform: Optional[Dict[str, str]] = Field(
         default=None,
-        description="Map Omni connection ID to DataHub platform name, for example {'<conn-id>': 'snowflake'}.",
+        description="Map Omni connection ID to DataHub platform name, e.g. {'<conn-id>': 'snowflake'}.",
     )
     connection_to_platform_instance: Optional[Dict[str, str]] = Field(
         default=None,
