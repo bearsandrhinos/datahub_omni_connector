@@ -10,6 +10,7 @@ Run tests:
 Re-generate the golden file after intentional changes:
     pytest tests/integration/omni/ -v --update-golden-files
 """
+
 from __future__ import annotations
 
 import json
