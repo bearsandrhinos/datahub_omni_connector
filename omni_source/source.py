@@ -365,7 +365,7 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
             external_url=external_url,
             dashboard_url=external_url,
             custom_properties=custom_properties,
-            parent_container=folder_urn,  # type: ignore[arg-type]
+            **({"parent_container": [folder_urn]} if folder_urn else {}),
         )
         dashboard.set_charts(chart_urns)
         if updated_at:

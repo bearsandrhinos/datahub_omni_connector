@@ -4,6 +4,15 @@ Omni is a cloud-native business intelligence platform. Learn more in the [offici
 
 The DataHub integration for Omni covers BI entities such as dashboards, charts, semantic datasets, and related ownership context. Depending on module capabilities, it can also capture features such as lineage, usage, profiling, ownership, tags, and stateful deletion detection.
 
+## Permissions
+
+To set up and run the Omni connector correctly, you must use an **Organization API key** for authentication. You need either:
+
+- **Organization Admin** permissions — so you can create an Organization API key yourself in **Settings > API access > Organization keys**, or
+- An Organization Admin to provision an Organization API key for you
+
+Personal Access Tokens (PATs) are not supported for this connector, as they cannot access all endpoints required for metadata ingestion. See [Omni API authentication](https://docs.omni.co/api/authentication#api-key-types) for details on API key types and creation.
+
 ## Concept Mapping
 
 | Omni Concept   | DataHub Concept                                               | Notes                                                                                  |
