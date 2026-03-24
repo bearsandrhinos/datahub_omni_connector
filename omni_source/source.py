@@ -44,6 +44,7 @@ from datahub.ingestion.api.source import (
     TestConnectionReport,
 )
 from datahub.ingestion.api.workunit import MetadataWorkUnit
+from datahub.ingestion.source.common.subtypes import DatasetSubTypes
 from omni_source.omni_api import OmniClient
 from omni_source.config import OmniSourceConfig
 from omni_source.lineage_parser import (
@@ -628,7 +629,7 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
             display_name=f"{readable_model}.topic.{topic_name}",
             description="Omni topic entity.",
             custom_properties=topic_props,
-            subtype="Topic",
+            subtype=DatasetSubTypes.TOPIC,
         )
         self.report.semantic_datasets_emitted += 1
 
@@ -1128,7 +1129,7 @@ class OmniSource(StatefulIngestionSourceBase, TestableSource):
                                 "topicName": topic_name,
                                 "inferred": "true",
                             },
-                            subtype="Topic",
+                            subtype=DatasetSubTypes.TOPIC,
                         )
                         self.report.semantic_datasets_emitted += 1
                     chart_inputs[qp_id].add(topic_urn)
